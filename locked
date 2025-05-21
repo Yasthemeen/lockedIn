@@ -1,0 +1,182 @@
+
+#include <LiquidCrystal.h>
+
+// LCD Setup
+LiquidCrystal lcd(7, 8, 9, 10, 11, 12);
+
+// Pin setup
+const int buttonSelect = 2;
+const int buttonInc = 3;
+const int buttonMove = 4;
+const int ledPin = 13;
+
+// Pressure sensor and buzzer
+const int ffs1 = A0;     // Pressure sensor input
+const int buzzerPin = 6; // Passive buzzer
+
+// Time digits: MM:SS
+int a = 0, b = 0, c = 0, d = 0;
+int selectedDigit = 0;
+int mode = 0;  // 0 = setting, 1 = counting
+
+// Time tracking
+unsigned long prevMillis = 0;
+unsigned long debounce = 0;
+int countdown = 0;
+bool alarmActive = false;
+unsigned long alarmStartTime = 0;
+
+// Pressure
+float cf = 50.0;
+int ffsdata = 0;
+float vout;
+
+void setup() {
+  lcd.begin(16, 2);
+  pinMode(buttonSelect, INPUT_PULLUP);
+  pinMode(buttonInc, INPUT_PULLUP);
+  pinMode(buttonMove, INPUT_PULLUP);
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(ledPin, OUTPUT);
+  pinMode(ffs1, INPUT);
+  digitalWrite(ledPin, LOW);
+
+  Serial.begin(9600);
+  lcd.print("Set Time:");
+  displaySetTime();
+}
+
+void loop() {
+  // Only check pressure while counting and not in alarm
+  if (mode == 1 && !alarmActive) {
+    readPressure();
+  }
+
+  // Handle timer modes
+  if (mode == 0) {
+    handleSetTime();
+  } else if (mode == 1) {
+    handleCountdown();
+  }
+
+  // Handle countdown alarm
+  if (alarmActive) {
+    lcd.clear();
+    lcd.print("   Time's up!");
+    digitalWrite(ledPin, HIGH);
+    tone(buzzerPin, 1000);  // Constant alert tone
+
+    // Auto-stop after 5 seconds
+    if (millis() - alarmStartTime >= 5000) {
+      alarmActive = false;
+      digitalWrite(ledPin, LOW);
+      noTone(buzzerPin);
+      reset();
+    }
+  }
+}
+
+void readPressure() {
+  ffsdata = analogRead(ffs1);
+  vout = (ffsdata * 5.0) / 1023.0;
+  float pressure = vout * cf;
+
+  Serial.print("Pressure: ");
+  Serial.println(pressure, 3);
+
+  if (ffsdata == 0) {
+    tone(buzzerPin, 659); delay(200); // E5
+    tone(buzzerPin, 784); delay(200); // G5
+    tone(buzzerPin, 880); delay(200); // A5
+    noTone(buzzerPin);
+  }
+}
+
+void handleSetTime() {
+  if (digitalRead(buttonMove) == LOW && millis() - debounce > 200) {
+    debounce = millis();
+    selectedDigit = (selectedDigit + 1) % 4;
+    displaySetTime();
+  }
+
+  if (digitalRead(buttonInc) == LOW && millis() - debounce > 200) {
+    debounce = millis();
+    switch (selectedDigit) {
+      case 0: a = (a + 1) % 10; break;
+      case 1: b = (b + 1) % 10; break;
+      case 2: c = (c + 1) % 6;  break;
+      case 3: d = (d + 1) % 10; break;
+    }
+    displaySetTime();
+  }
+
+  if (digitalRead(buttonSelect) == LOW && millis() - debounce > 200) {
+    debounce = millis();
+    countdown = ((a * 10 + b) * 60) + (c * 10 + d);
+    if (countdown > 0) {
+      mode = 1;
+      lcd.clear();
+      lcd.print("Time Left:");
+      displayCountdown();
+      prevMillis = millis();
+    }
+  }
+}
+
+void handleCountdown() {
+  if (millis() - prevMillis >= 1000 && countdown > 0) {
+    prevMillis = millis();
+    countdown--;
+    displayCountdown();
+  }
+
+  if (countdown == 0 && !alarmActive) {
+    alarmActive = true;
+    alarmStartTime = millis();  // Start 5-sec alarm
+  }
+
+  if (digitalRead(buttonSelect) == LOW && millis() - debounce > 200) {
+    debounce = millis();
+    mode = 0;
+    reset();
+  }
+}
+
+void displaySetTime() {
+  lcd.setCursor(0, 1);
+  lcd.print("  ");
+  lcd.print(a); lcd.print(b);
+  lcd.print(":");
+  lcd.print(c); lcd.print(d);
+  lcd.print("     ");
+
+  lcd.setCursor(2 + selectedDigit + (selectedDigit >= 2 ? 1 : 0), 0);
+  lcd.write(byte(0));
+  lcd.setCursor(0, 0);
+  lcd.print("Set Time:");
+}
+
+void displayCountdown() {
+  int mins = countdown / 60;
+  int secs = countdown % 60;
+
+  lcd.setCursor(0, 1);
+  lcd.print("  ");
+  if (mins < 10) lcd.print("0");
+  lcd.print(mins);
+  lcd.print(":");
+  if (secs < 10) lcd.print("0");
+  lcd.print(secs);
+  lcd.print("     ");
+}
+
+void reset() {
+  mode = 0;
+  a = b = c = d = 0;
+  selectedDigit = 0;
+  countdown = 0;
+  lcd.clear();
+  lcd.print("Set Time:");
+  displaySetTime();
+}
+
