@@ -1,5 +1,24 @@
-
 #include <LiquidCrystal.h>
+
+// Melody setup
+const int melody[] = { 659, 784, 880, 988, 880, 784, 659 }; // E G A B A G E
+const int noteDuration = 300;
+const int numNotes = sizeof(melody) / sizeof(melody[0]);
+
+int currentNote = 0;
+unsigned long lastNoteTime = 0;
+
+String currentQuest = "";
+const char* quests[] = {
+  "Drink water",
+  // "Take a deep breath",
+  "Stretch",
+  "Smile :)",
+  "Breathe~ :)",
+
+  // "Relax your shoulders"
+};
+const int questCount = sizeof(quests) / sizeof(quests[0]);
 
 // LCD Setup
 LiquidCrystal lcd(7, 8, 9, 10, 11, 12);
@@ -11,8 +30,9 @@ const int buttonMove = 4;
 const int ledPin = 13;
 
 // Pressure sensor and buzzer
-const int ffs1 = A0;     // Pressure sensor input
-const int buzzerPin = 6; // Passive buzzer
+const int ffs1 = A0;
+const int ffs2 = A1;
+const int buzzerPin = 6;
 
 // Time digits: MM:SS
 int a = 0, b = 0, c = 0, d = 0;
@@ -26,10 +46,32 @@ int countdown = 0;
 bool alarmActive = false;
 unsigned long alarmStartTime = 0;
 
-// Pressure
+// Pressure tracking
 float cf = 50.0;
-int ffsdata = 0;
-float vout;
+int ffsdata1 = 0;
+int ffsdata2 = 0;
+float vout1, vout2;
+bool pressureLow = false;
+bool pressureSuppressed = false;
+
+// Tone cycling
+unsigned long lastToneTime = 0;
+int toneIndex = 0;
+
+// Pressure suppression timing
+unsigned long pressureSuppressStart = 0;
+const unsigned long pressureSuppressDuration = 3000;  // suppress pressure tones 3 seconds after alarm
+
+// Message display phase enum
+enum MessagePhase {
+  NONE,
+  TIME_UP,
+  QUEST
+};
+
+MessagePhase messagePhase = NONE;
+unsigned long phaseStartTime = 0;
+int questIndex = 0;
 
 void setup() {
   lcd.begin(16, 2);
@@ -39,6 +81,8 @@ void setup() {
   pinMode(buzzerPin, OUTPUT);
   pinMode(ledPin, OUTPUT);
   pinMode(ffs1, INPUT);
+  randomSeed(analogRead(A5));
+  pinMode(ffs2, INPUT);
   digitalWrite(ledPin, LOW);
 
   Serial.begin(9600);
@@ -47,8 +91,8 @@ void setup() {
 }
 
 void loop() {
-  // Only check pressure while counting and not in alarm
-  if (mode == 1 && !alarmActive) {
+  // Only check pressure while counting, not in alarm, and more than 1 second left
+  if (mode == 1 && !alarmActive && countdown > 1) {
     readPressure();
   }
 
@@ -59,36 +103,109 @@ void loop() {
     handleCountdown();
   }
 
-  // Handle countdown alarm
+  // Handle countdown alarm and post-alarm message
   if (alarmActive) {
-    lcd.clear();
-    lcd.print("   Time's up!");
-    digitalWrite(ledPin, HIGH);
-    tone(buzzerPin, 1000);  // Constant alert tone
+    if (currentNote == 0 && lastNoteTime == 0) {  // First time alarm triggers
+      lcd.clear();
+      lcd.print("   Time's up!");
+      digitalWrite(ledPin, HIGH);
+    }
 
-    // Auto-stop after 5 seconds
-    if (millis() - alarmStartTime >= 5000) {
+    playMelody();
+
+    // Suppress pressure tones during or shortly after alarm ends
+    if (alarmActive || (pressureSuppressed && millis() - pressureSuppressStart < pressureSuppressDuration)) {
+      if (!alarmActive || currentNote >= numNotes) {
+        noTone(buzzerPin);
+      }
+    }
+
+    // After melody finishes, start QUEST phase immediately
+    if (currentNote >= numNotes && messagePhase == NONE) {
       alarmActive = false;
       digitalWrite(ledPin, LOW);
       noTone(buzzerPin);
+
+      messagePhase = QUEST;
+
+      questIndex = random(questCount);
+      currentQuest = String("Good job!\n") + quests[questIndex];
+
+      pressureSuppressed = true;
+      pressureSuppressStart = millis();
+    }
+  }
+
+  // Handle message phases after alarm
+  static bool questDisplayed = false;  // Track if quest message shown
+
+  if (messagePhase == QUEST) {
+    if (!questDisplayed) {
+      lcd.clear();
+      lcd.print("Good job!");
+      lcd.setCursor(0, 1);
+      lcd.print(quests[questIndex]);
+      questDisplayed = true;
+    }
+
+    // Wait for buttonMove (pin 4) press to reset
+    if (digitalRead(buttonMove) == LOW && millis() - debounce > 200) {
+      debounce = millis();
+      messagePhase = NONE;
+      questDisplayed = false;   // Reset flag for next time
       reset();
     }
   }
+
+  // Play pressure tone if needed
+  if (!alarmActive && messagePhase == NONE && countdown > 1 && pressureLow && millis() - lastToneTime >= 150) {
+    lastToneTime = millis();
+    switch (toneIndex) {
+      case 0: tone(buzzerPin, 659); break;
+      case 1: tone(buzzerPin, 784); break;
+      case 2: tone(buzzerPin, 880); break;
+    }
+    toneIndex = (toneIndex + 1) % 3;
+  }
+}
+
+int smoothPressure(int pin) {
+  long sum = 0;
+  for (int i = 0; i < 10; i++) {
+    sum += analogRead(pin);
+    delay(1);
+  }
+  return sum / 10;
 }
 
 void readPressure() {
-  ffsdata = analogRead(ffs1);
-  vout = (ffsdata * 5.0) / 1023.0;
-  float pressure = vout * cf;
+  ffsdata1 = smoothPressure(ffs1);
+  ffsdata2 = smoothPressure(ffs2);
 
-  Serial.print("Pressure: ");
-  Serial.println(pressure, 3);
+  vout1 = (ffsdata1 * 5.0) / 1023.0;
+  vout2 = (ffsdata2 * 5.0) / 1023.0;
 
-  if (ffsdata == 0) {
-    tone(buzzerPin, 659); delay(200); // E5
-    tone(buzzerPin, 784); delay(200); // G5
-    tone(buzzerPin, 880); delay(200); // A5
+  float pressure1 = vout1 * cf;
+  float pressure2 = vout2 * cf;
+
+  Serial.print("FSR1: ");
+  Serial.print(ffsdata1);
+  Serial.print("  Pressure: ");
+  Serial.print(pressure1, 2);
+  Serial.print("  |  FSR2: ");
+  Serial.print(ffsdata2);
+  Serial.print("  Pressure: ");
+  Serial.println(pressure2, 2);
+
+  bool isLow = (ffsdata1 < 246 || ffsdata2 < 45);
+
+  if (isLow && !pressureLow) {
+    pressureLow = true;
+    lastToneTime = millis();
+  } else if (!isLow && pressureLow) {
+    pressureLow = false;
     noTone(buzzerPin);
+    toneIndex = 0;
   }
 }
 
@@ -132,7 +249,13 @@ void handleCountdown() {
 
   if (countdown == 0 && !alarmActive) {
     alarmActive = true;
-    alarmStartTime = millis();  // Start 5-sec alarm
+    alarmStartTime = millis();
+    currentNote = 0;
+    lastNoteTime = 0;
+
+    pressureLow = false;         // Immediately cancel pressure warning
+    noTone(buzzerPin);           // Stop any pressure tone before melody
+    toneIndex = 0;
   }
 
   if (digitalRead(buttonSelect) == LOW && millis() - debounce > 200) {
@@ -168,6 +291,13 @@ void displayCountdown() {
   if (secs < 10) lcd.print("0");
   lcd.print(secs);
   lcd.print("     ");
+
+  Serial.print("Time Left: ");
+  if (mins < 10) Serial.print("0");
+  Serial.print(mins);
+  Serial.print(":");
+  if (secs < 10) Serial.print("0");
+  Serial.println(secs);
 }
 
 void reset() {
@@ -175,8 +305,25 @@ void reset() {
   a = b = c = d = 0;
   selectedDigit = 0;
   countdown = 0;
+  pressureSuppressed = false;
+  messagePhase = NONE;
   lcd.clear();
   lcd.print("Set Time:");
   displaySetTime();
 }
+
+void playMelody() {
+  unsigned long currentTime = millis();
+
+  if (currentNote < numNotes) {
+    if (lastNoteTime == 0 || currentTime - lastNoteTime >= noteDuration) {
+      tone(buzzerPin, melody[currentNote]);
+      lastNoteTime = currentTime;
+      currentNote++;
+    }
+  } else {
+    noTone(buzzerPin);
+  }
+}
+
 
